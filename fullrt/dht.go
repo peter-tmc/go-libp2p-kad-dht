@@ -854,6 +854,7 @@ func (dht *FullRT) execOnMany(ctx context.Context, fn func(context.Context, peer
 	var numFail, numSuccess int
 	var t *time.Timer
 	var timeoutChan <-chan time.Time
+	var hasTimedOut bool
 
 	for numFail+numSuccess != len(peers) {
 		select {
@@ -865,7 +866,7 @@ func (dht *FullRT) execOnMany(ctx context.Context, fn func(context.Context, peer
 					t = time.NewTimer(time.Millisecond * 500)
 					timeoutChan = t.C
 					defer t.Stop()
-				} else {
+				} else if !hasTimedOut {
 					if !t.Stop() {
 						<-t.C
 					}
@@ -875,6 +876,7 @@ func (dht *FullRT) execOnMany(ctx context.Context, fn func(context.Context, peer
 			numSuccess++
 		case <-timeoutChan:
 			cancel()
+			hasTimedOut = true
 		}
 	}
 	return numSuccess
