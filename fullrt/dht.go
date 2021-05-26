@@ -853,6 +853,7 @@ func (dht *FullRT) execOnMany(ctx context.Context, fn func(context.Context, peer
 
 	var numFail, numSuccess int
 	var t *time.Timer
+	var toChan <-chan time.Time
 
 	for numFail+numSuccess != len(peers) {
 		select {
@@ -862,6 +863,7 @@ func (dht *FullRT) execOnMany(ctx context.Context, fn func(context.Context, peer
 			if numSuccess >= numSuccessfulToWaitFor {
 				if t == nil {
 					t = time.NewTimer(time.Millisecond * 500)
+					toChan = t.C
 					defer t.Stop()
 				} else {
 					if !t.Stop() {
@@ -871,7 +873,7 @@ func (dht *FullRT) execOnMany(ctx context.Context, fn func(context.Context, peer
 				}
 			}
 			numSuccess++
-		case <-t.C:
+		case <-toChan:
 			cancel()
 		}
 	}
