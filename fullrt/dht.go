@@ -852,21 +852,23 @@ func (dht *FullRT) execOnMany(ctx context.Context, fn func(context.Context, peer
 	}
 
 	var numFail, numSuccess int
-	t := time.NewTimer(0)
-	if !t.Stop() {
-		<-t.C
-	}
-	defer t.Stop()
+	var t *time.Timer
+
 	for numFail+numSuccess != len(peers) {
 		select {
 		case <-waitFailCh:
 			numFail++
 		case <-waitSuccessCh:
 			if numSuccess >= numSuccessfulToWaitFor {
-				if !t.Stop() {
-					<-t.C
+				if t == nil {
+					t = time.NewTimer(time.Millisecond * 500)
+					defer t.Stop()
+				} else {
+					if !t.Stop() {
+						<-t.C
+					}
+					t.Reset(time.Millisecond * 500)
 				}
-				t.Reset(time.Millisecond * 500)
 			}
 			numSuccess++
 		case <-t.C:
