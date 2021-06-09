@@ -1,4 +1,4 @@
-module github.com/libp2p/go-libp2p-kad-dht
+module github.com/peter-tmc/go-libp2p-kad-dht
 
 go 1.14
 
