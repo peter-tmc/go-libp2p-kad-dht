@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/libp2p/go-libp2p-core/host"
 	"github.com/libp2p/go-libp2p-core/peer"
 	"github.com/libp2p/go-libp2p-core/routing"
@@ -15,7 +17,7 @@ import (
 	recpb "github.com/libp2p/go-libp2p-record/pb"
 	"github.com/multiformats/go-multihash"
 
-	"github.com/libp2p/go-libp2p-kad-dht/internal"
+	"github.com/peter-tmc/go-libp2p-kad-dht/internal"
 )
 
 var logger = logging.Logger("dht")
@@ -158,6 +160,43 @@ func (pm *ProtocolMessenger) GetProviders(ctx context.Context, p peer.ID, key mu
 	}
 	provs := PBPeersToPeerInfos(respMsg.GetProviderPeers())
 	closerPeers := PBPeersToPeerInfos(respMsg.GetCloserPeers())
+	msg := " "
+	if provs != nil {
+		msg = msg + "providers:"
+		for _, v := range provs {
+			msg = msg + " " + v.String()
+		}
+		msg = msg + " "
+	} else {
+		msg = msg + " providers returned null"
+	}
+	//logger.Info("Sent GetProviders to " + p.Pretty() + msg + " got " + strconv.Itoa(len(closerPeers)) + " closer peers")
+	return provs, closerPeers, nil
+}
+
+func (pm *ProtocolMessenger) GetProvidersMod(ctx context.Context, p peer.ID, key multihash.Multihash, uid uuid.UUID) ([]*peer.AddrInfo, []*peer.AddrInfo, error) {
+	pmes := NewMessage(Message_GET_PROVIDERS, key, 0)
+	t1 := time.Now()
+	logger.Info("Sent getProviders message to " + p.Pretty() + " at time " + t1.UTC().String() + " for key " + key.B58String() + " request ID is " + uid.String())
+	respMsg, err := pm.m.SendRequest(ctx, p, pmes) //TODO posso meter um log com mandei msg ao peer a certas horas e depois quando se recebe a resposta dar log disso e assim ja da para calcular a latencia
+	t2 := time.Now()
+	logger.Info("Received response to getProviders from peer " + p.Pretty() + " took " + t2.Sub(t1).String() + " at time " + t2.UTC().String() + " request ID is " + uid.String())
+	if err != nil {
+		return nil, nil, err
+	}
+	provs := PBPeersToPeerInfos(respMsg.GetProviderPeers())
+	closerPeers := PBPeersToPeerInfos(respMsg.GetCloserPeers())
+	msg := " "
+	if provs != nil {
+		msg = msg + "providers:"
+		for _, v := range provs {
+			msg = msg + " " + v.String()
+		}
+		msg = msg + " "
+	} else {
+		msg = msg + " providers returned null"
+	}
+	//logger.Info("Sent GetProviders to " + p.Pretty() + msg + " got " + strconv.Itoa(len(closerPeers)) + " closer peers")
 	return provs, closerPeers, nil
 }
 

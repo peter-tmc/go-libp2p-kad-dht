@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/libp2p/go-libp2p-core/network"
 	"github.com/libp2p/go-libp2p-core/peer"
 	"github.com/libp2p/go-libp2p-core/peerstore"
@@ -14,12 +15,12 @@ import (
 
 	"github.com/ipfs/go-cid"
 	u "github.com/ipfs/go-ipfs-util"
-	"github.com/libp2p/go-libp2p-kad-dht/internal"
-	internalConfig "github.com/libp2p/go-libp2p-kad-dht/internal/config"
-	"github.com/libp2p/go-libp2p-kad-dht/qpeerset"
 	kb "github.com/libp2p/go-libp2p-kbucket"
 	record "github.com/libp2p/go-libp2p-record"
 	"github.com/multiformats/go-multihash"
+	"github.com/peter-tmc/go-libp2p-kad-dht/internal"
+	internalConfig "github.com/peter-tmc/go-libp2p-kad-dht/internal/config"
+	"github.com/peter-tmc/go-libp2p-kad-dht/qpeerset"
 )
 
 // This file implements the Routing interface for the IpfsDHT struct.
@@ -464,6 +465,77 @@ func (dht *IpfsDHT) Provide(ctx context.Context, key cid.Cid, brdcst bool) (err 
 	return ctx.Err()
 }
 
+func (dht *IpfsDHT) ProvideMod(ctx context.Context, key cid.Cid, brdcst bool, uid uuid.UUID) (err error) {
+	if !dht.enableProviders {
+		return routing.ErrNotSupported
+	} else if !key.Defined() {
+		return fmt.Errorf("invalid cid: undefined")
+	}
+	keyMH := key.Hash()
+	logger.Debugw("providing", "cid", key, "mh", internal.LoggableProviderRecordBytes(keyMH))
+
+	// add self locally
+	dht.ProviderManager.AddProvider(ctx, keyMH, dht.self)
+	if !brdcst {
+		return nil
+	}
+
+	closerCtx := ctx
+	if deadline, ok := ctx.Deadline(); ok {
+		now := time.Now()
+		timeout := deadline.Sub(now)
+
+		if timeout < 0 {
+			// timed out
+			return context.DeadlineExceeded
+		} else if timeout < 10*time.Second {
+			// Reserve 10% for the final put.
+			deadline = deadline.Add(-timeout / 10)
+		} else {
+			// Otherwise, reserve a second (we'll already be
+			// connected so this should be fast).
+			deadline = deadline.Add(-time.Second)
+		}
+		var cancel context.CancelFunc
+		closerCtx, cancel = context.WithDeadline(ctx, deadline)
+		defer cancel()
+	}
+
+	var exceededDeadline bool
+	peers, err := dht.GetClosestPeers(closerCtx, string(keyMH))
+	switch err {
+	case context.DeadlineExceeded:
+		// If the _inner_ deadline has been exceeded but the _outer_
+		// context is still fine, provide the value to the closest peers
+		// we managed to find, even if they're not the _actual_ closest peers.
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		exceededDeadline = true
+	case nil:
+	default:
+		return err
+	}
+
+	wg := sync.WaitGroup{}
+	for _, p := range peers {
+		wg.Add(1)
+		go func(p peer.ID) {
+			defer wg.Done()
+			logger.Debugf("putProvider(%s, %s)", internal.LoggableProviderRecordBytes(keyMH), p)
+			err := dht.protoMessenger.PutProvider(ctx, p, keyMH, dht.host)
+			if err != nil {
+				logger.Debug(err)
+			}
+		}(p)
+	}
+	wg.Wait()
+	if exceededDeadline {
+		return context.DeadlineExceeded
+	}
+	return ctx.Err()
+}
+
 // FindProviders searches until the context expires.
 func (dht *IpfsDHT) FindProviders(ctx context.Context, c cid.Cid) ([]peer.AddrInfo, error) {
 	if !dht.enableProviders {
@@ -474,6 +546,20 @@ func (dht *IpfsDHT) FindProviders(ctx context.Context, c cid.Cid) ([]peer.AddrIn
 
 	var providers []peer.AddrInfo
 	for p := range dht.FindProvidersAsync(ctx, c, dht.bucketSize) {
+		providers = append(providers, p)
+	}
+	return providers, nil
+}
+
+func (dht *IpfsDHT) FindProvidersMod(ctx context.Context, c cid.Cid, uid uuid.UUID) ([]peer.AddrInfo, error) { // TODO
+	if !dht.enableProviders {
+		return nil, routing.ErrNotSupported
+	} else if !c.Defined() {
+		return nil, fmt.Errorf("invalid cid: undefined")
+	}
+
+	var providers []peer.AddrInfo
+	for p := range dht.FindProvidersAsyncMod(ctx, c, dht.bucketSize, uid) {
 		providers = append(providers, p)
 	}
 	return providers, nil
@@ -507,7 +593,7 @@ func (dht *IpfsDHT) FindProvidersAsync(ctx context.Context, key cid.Cid, count i
 func (dht *IpfsDHT) findProvidersAsyncRoutine(ctx context.Context, key multihash.Multihash, count int, peerOut chan peer.AddrInfo) {
 	defer close(peerOut)
 
-	findAll := count == 0
+	findAll := count == 0 //count is the dht.bucketSize
 	var ps *peer.Set
 	if findAll {
 		ps = peer.NewSet()
@@ -515,7 +601,7 @@ func (dht *IpfsDHT) findProvidersAsyncRoutine(ctx context.Context, key multihash
 		ps = peer.NewLimitedSet(count)
 	}
 
-	provs := dht.ProviderManager.GetProviders(ctx, key)
+	provs := dht.ProviderManager.GetProviders(ctx, key) //localmente
 	for _, p := range provs {
 		// NOTE: Assuming that this list of peers is unique
 		if ps.TryAdd(p) {
@@ -591,6 +677,181 @@ func (dht *IpfsDHT) findProvidersAsyncRoutine(ctx context.Context, key multihash
 
 // FindPeer searches for a peer with given ID.
 func (dht *IpfsDHT) FindPeer(ctx context.Context, id peer.ID) (_ peer.AddrInfo, err error) {
+	if err := id.Validate(); err != nil {
+		return peer.AddrInfo{}, err
+	}
+
+	logger.Debugw("finding peer", "peer", id)
+
+	// Check if were already connected to them
+	if pi := dht.FindLocal(id); pi.ID != "" {
+		return pi, nil
+	}
+
+	lookupRes, err := dht.runLookupWithFollowup(ctx, string(id),
+		func(ctx context.Context, p peer.ID) ([]*peer.AddrInfo, error) {
+			// For DHT query command
+			routing.PublishQueryEvent(ctx, &routing.QueryEvent{
+				Type: routing.SendingQuery,
+				ID:   p,
+			})
+
+			peers, err := dht.protoMessenger.GetClosestPeers(ctx, p, id)
+			if err != nil {
+				logger.Debugf("error getting closer peers: %s", err)
+				return nil, err
+			}
+
+			// For DHT query command
+			routing.PublishQueryEvent(ctx, &routing.QueryEvent{
+				Type:      routing.PeerResponse,
+				ID:        p,
+				Responses: peers,
+			})
+
+			return peers, err
+		},
+		func() bool {
+			return dht.host.Network().Connectedness(id) == network.Connected
+		},
+	)
+
+	if err != nil {
+		return peer.AddrInfo{}, err
+	}
+
+	dialedPeerDuringQuery := false
+	for i, p := range lookupRes.peers {
+		if p == id {
+			// Note: we consider PeerUnreachable to be a valid state because the peer may not support the DHT protocol
+			// and therefore the peer would fail the query. The fact that a peer that is returned can be a non-DHT
+			// server peer and is not identified as such is a bug.
+			dialedPeerDuringQuery = (lookupRes.state[i] == qpeerset.PeerQueried || lookupRes.state[i] == qpeerset.PeerUnreachable || lookupRes.state[i] == qpeerset.PeerWaiting)
+			break
+		}
+	}
+
+	// Return peer information if we tried to dial the peer during the query or we are (or recently were) connected
+	// to the peer.
+	connectedness := dht.host.Network().Connectedness(id)
+	if dialedPeerDuringQuery || connectedness == network.Connected || connectedness == network.CanConnect {
+		return dht.peerstore.PeerInfo(id), nil
+	}
+
+	return peer.AddrInfo{}, routing.ErrNotFound
+}
+
+func (dht *IpfsDHT) FindProvidersAsyncMod(ctx context.Context, key cid.Cid, count int, uid uuid.UUID) <-chan peer.AddrInfo {
+	if !dht.enableProviders || !key.Defined() {
+		peerOut := make(chan peer.AddrInfo)
+		close(peerOut)
+		return peerOut
+	}
+
+	chSize := count
+	if count == 0 {
+		chSize = 1
+	}
+	peerOut := make(chan peer.AddrInfo, chSize)
+
+	keyMH := key.Hash()
+
+	logger.Debugw("finding providers", "cid", key, "mh", internal.LoggableProviderRecordBytes(keyMH))
+	go dht.findProvidersAsyncRoutineMod(ctx, keyMH, count, peerOut, uid)
+	return peerOut
+}
+
+func (dht *IpfsDHT) findProvidersAsyncRoutineMod(ctx context.Context, key multihash.Multihash, count int, peerOut chan peer.AddrInfo, uid uuid.UUID) {
+	defer close(peerOut)
+
+	findAll := count == 0
+	var ps *peer.Set
+	if findAll {
+		ps = peer.NewSet()
+	} else {
+		ps = peer.NewLimitedSet(count)
+	}
+
+	provs := dht.ProviderManager.GetProviders(ctx, key) //TODO este é feito localmente?
+	for _, p := range provs {
+		// NOTE: Assuming that this list of peers is unique
+		if ps.TryAdd(p) {
+			logger.Info("ID: " + uid.String() + " found peer locally " + p.Pretty())
+			pi := dht.peerstore.PeerInfo(p)
+			select {
+			case peerOut <- pi:
+			case <-ctx.Done():
+				return
+			}
+		}
+
+		// If we have enough peers locally, don't bother with remote RPC
+		// TODO: is this a DOS vector?
+		if !findAll && ps.Size() >= count {
+			return
+		}
+	}
+	ctx = context.WithValue(ctx, "uuid", uid)
+	lookupRes, err := dht.runLookupWithFollowupMod(ctx, string(key), uid,
+		func(ctx context.Context, p peer.ID) ([]*peer.AddrInfo, error) { //TODO mudar para ter o uid
+			// For DHT query command
+			uid := ctx.Value("uuid").(uuid.UUID)
+			logger.Info("Publishing query event for peer " + p.Pretty() + " id of request is " + uid.String())
+			routing.PublishQueryEvent(ctx, &routing.QueryEvent{
+				Type: routing.SendingQuery,
+				ID:   p,
+			})
+
+			provs, closest, err := dht.protoMessenger.GetProvidersMod(ctx, p, key, uid)
+			if err != nil {
+				return nil, err
+			}
+			logger.Sync()
+
+			logger.Debugf("%d provider entries", len(provs))
+
+			// Add unique providers from request, up to 'count'
+			for _, prov := range provs {
+				dht.maybeAddAddrs(prov.ID, prov.Addrs, peerstore.TempAddrTTL)
+				logger.Debugf("got provider: %s", prov)
+				if ps.TryAdd(prov.ID) {
+					logger.Debugf("using provider: %s", prov)
+					select {
+					case peerOut <- *prov:
+					case <-ctx.Done():
+						logger.Debug("context timed out sending more providers")
+						return nil, ctx.Err()
+					}
+				}
+				if !findAll && ps.Size() >= count {
+					logger.Debugf("got enough providers (%d/%d)", ps.Size(), count)
+					return nil, nil
+				}
+			}
+
+			// Give closer peers back to the query to be queried
+			logger.Debugf("got closer peers: %d %s", len(closest), closest)
+
+			routing.PublishQueryEvent(ctx, &routing.QueryEvent{
+				Type:      routing.PeerResponse,
+				ID:        p,
+				Responses: closest,
+			})
+
+			return closest, nil
+		},
+		func() bool {
+			return !findAll && ps.Size() >= count
+		},
+	)
+
+	if err == nil && ctx.Err() == nil {
+		dht.refreshRTIfNoShortcut(kb.ConvertKey(string(key)), lookupRes)
+	}
+}
+
+// FindPeer searches for a peer with given ID.
+func (dht *IpfsDHT) FindPeerMod(ctx context.Context, id peer.ID, uid uuid.UUID) (_ peer.AddrInfo, err error) {
 	if err := id.Validate(); err != nil {
 		return peer.AddrInfo{}, err
 	}

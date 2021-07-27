@@ -2,7 +2,7 @@ package dht
 
 import (
 	"github.com/libp2p/go-libp2p-core/routing"
-	internalConfig "github.com/libp2p/go-libp2p-kad-dht/internal/config"
+	internalConfig "github.com/peter-tmc/go-libp2p-kad-dht/internal/config"
 )
 
 // Quorum is a DHT option that tells the DHT how many peers it needs to get

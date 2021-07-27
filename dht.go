@@ -15,17 +15,17 @@ import (
 	"github.com/libp2p/go-libp2p-core/protocol"
 	"github.com/libp2p/go-libp2p-core/routing"
 
-	"github.com/libp2p/go-libp2p-kad-dht/internal"
-	dhtcfg "github.com/libp2p/go-libp2p-kad-dht/internal/config"
-	"github.com/libp2p/go-libp2p-kad-dht/internal/net"
-	"github.com/libp2p/go-libp2p-kad-dht/metrics"
-	pb "github.com/libp2p/go-libp2p-kad-dht/pb"
-	"github.com/libp2p/go-libp2p-kad-dht/providers"
-	"github.com/libp2p/go-libp2p-kad-dht/rtrefresh"
 	kb "github.com/libp2p/go-libp2p-kbucket"
 	"github.com/libp2p/go-libp2p-kbucket/peerdiversity"
 	record "github.com/libp2p/go-libp2p-record"
 	recpb "github.com/libp2p/go-libp2p-record/pb"
+	"github.com/peter-tmc/go-libp2p-kad-dht/internal"
+	dhtcfg "github.com/peter-tmc/go-libp2p-kad-dht/internal/config"
+	"github.com/peter-tmc/go-libp2p-kad-dht/internal/net"
+	"github.com/peter-tmc/go-libp2p-kad-dht/metrics"
+	pb "github.com/peter-tmc/go-libp2p-kad-dht/pb"
+	"github.com/peter-tmc/go-libp2p-kad-dht/providers"
+	"github.com/peter-tmc/go-libp2p-kad-dht/rtrefresh"
 
 	"github.com/gogo/protobuf/proto"
 	ds "github.com/ipfs/go-datastore"
@@ -165,7 +165,10 @@ var (
 // If the Routing Table has more than "minRTRefreshThreshold" peers, we consider a peer as a Routing Table candidate ONLY when
 // we successfully get a query response from it OR if it send us a query.
 func New(ctx context.Context, h host.Host, options ...Option) (*IpfsDHT, error) {
+	lvl, _ := logging.LevelFromString("info")
+	logging.SetAllLoggers(lvl)
 	var cfg dhtcfg.Config
+
 	if err := cfg.Apply(append([]Option{dhtcfg.Defaults}, options...)...); err != nil {
 		return nil, err
 	}
@@ -472,7 +475,7 @@ func (dht *IpfsDHT) fixLowPeers(ctx context.Context) {
 	// TODO Active Bootstrapping
 	// We should first use non-bootstrap peers we knew of from previous
 	// snapshots of the Routing Table before we connect to the bootstrappers.
-	// See https://github.com/libp2p/go-libp2p-kad-dht/issues/387.
+	// See https://github.com/peter-tmc/go-libp2p-kad-dht/issues/387.
 	if dht.routingTable.Size() == 0 {
 		if len(dht.bootstrapPeers) == 0 {
 			// No point in continuing, we have no peers!

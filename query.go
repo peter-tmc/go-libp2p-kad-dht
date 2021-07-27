@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strconv"
 	"sync"
 	"time"
 
@@ -14,8 +15,8 @@ import (
 	"github.com/libp2p/go-libp2p-core/routing"
 
 	"github.com/google/uuid"
-	"github.com/libp2p/go-libp2p-kad-dht/qpeerset"
 	kb "github.com/libp2p/go-libp2p-kbucket"
+	"github.com/peter-tmc/go-libp2p-kad-dht/qpeerset"
 )
 
 // ErrNoPeersQueried is returned when we failed to connect to any peers.
@@ -90,6 +91,77 @@ func (dht *IpfsDHT) runLookupWithFollowup(ctx context.Context, target string, qu
 	queryPeers := make([]peer.ID, 0, len(lookupRes.peers))
 	for i, p := range lookupRes.peers {
 		if state := lookupRes.state[i]; state == qpeerset.PeerHeard || state == qpeerset.PeerWaiting {
+			//logger.Info("LookupWithFollowUp contacted peer " + p.Pretty() + " target is " + target + " peer ID from key is " + peer.ID(target).Pretty())
+			queryPeers = append(queryPeers, p)
+		}
+	}
+
+	if len(queryPeers) == 0 {
+		return lookupRes, nil
+	}
+
+	// return if the lookup has been externally stopped
+	if ctx.Err() != nil || stopFn() {
+		lookupRes.completed = false
+		return lookupRes, nil
+	}
+
+	doneCh := make(chan struct{}, len(queryPeers))
+	followUpCtx, cancelFollowUp := context.WithCancel(ctx)
+	defer cancelFollowUp()
+	for _, p := range queryPeers {
+		qp := p
+		go func() {
+			_, _ = queryFn(followUpCtx, qp)
+			doneCh <- struct{}{}
+		}()
+	}
+
+	// wait for all queries to complete before returning, aborting ongoing queries if we've been externally stopped
+	followupsCompleted := 0
+processFollowUp:
+	for i := 0; i < len(queryPeers); i++ {
+		select {
+		case <-doneCh:
+			followupsCompleted++
+			if stopFn() {
+				cancelFollowUp()
+				if i < len(queryPeers)-1 {
+					lookupRes.completed = false
+				}
+				break processFollowUp
+			}
+		case <-ctx.Done():
+			lookupRes.completed = false
+			cancelFollowUp()
+			break processFollowUp
+		}
+	}
+
+	if !lookupRes.completed {
+		for i := followupsCompleted; i < len(queryPeers); i++ {
+			<-doneCh
+		}
+	}
+
+	return lookupRes, nil
+}
+
+func (dht *IpfsDHT) runLookupWithFollowupMod(ctx context.Context, target string, uid uuid.UUID, queryFn queryFn, stopFn stopFn) (*lookupWithFollowupResult, error) {
+	// run the query
+	lookupRes, err := dht.runQueryMod(ctx, target, uid, queryFn, stopFn)
+	if err != nil {
+		return nil, err
+	}
+
+	// query all of the top K peers we've either Heard about or have outstanding queries we're Waiting on.
+	// This ensures that all of the top K results have been queried which adds to resiliency against churn for query
+	// functions that carry state (e.g. FindProviders and GetValue) as well as establish connections that are needed
+	// by stateless query functions (e.g. GetClosestPeers and therefore Provide and PutValue)
+	queryPeers := make([]peer.ID, 0, len(lookupRes.peers))
+	for i, p := range lookupRes.peers {
+		if state := lookupRes.state[i]; state == qpeerset.PeerHeard || state == qpeerset.PeerWaiting {
+			//logger.Info("LookupWithFollowUp contacted peer " + p.Pretty() + " target is " + target + " peer ID from key is " + peer.ID(target).Pretty())
 			queryPeers = append(queryPeers, p)
 		}
 	}
@@ -172,6 +244,42 @@ func (dht *IpfsDHT) runQuery(ctx context.Context, target string, queryFn queryFn
 
 	// run the query
 	q.run()
+
+	if ctx.Err() == nil {
+		q.recordValuablePeers()
+	}
+
+	res := q.constructLookupResult(targetKadID)
+	return res, nil
+}
+
+func (dht *IpfsDHT) runQueryMod(ctx context.Context, target string, uid uuid.UUID, queryFn queryFn, stopFn stopFn) (*lookupWithFollowupResult, error) {
+	// pick the K closest peers to the key in our Routing table.
+	targetKadID := kb.ConvertKey(target)
+	seedPeers := dht.routingTable.NearestPeers(targetKadID, dht.bucketSize)
+	if len(seedPeers) == 0 {
+		routing.PublishQueryEvent(ctx, &routing.QueryEvent{
+			Type:  routing.QueryError,
+			Extra: kb.ErrLookupFailure.Error(),
+		})
+		return nil, kb.ErrLookupFailure
+	}
+
+	q := &query{
+		id:         uuid.New(),
+		key:        target,
+		ctx:        ctx,
+		dht:        dht,
+		queryPeers: qpeerset.NewQueryPeerset(target),
+		seedPeers:  seedPeers,
+		peerTimes:  make(map[peer.ID]time.Duration),
+		terminated: false,
+		queryFn:    queryFn,
+		stopFn:     stopFn,
+	}
+
+	// run the query
+	q.runMod(uid)
 
 	if ctx.Err() == nil {
 		q.recordValuablePeers()
@@ -301,6 +409,49 @@ func (q *query) run() {
 	}
 }
 
+func (q *query) runMod(uid uuid.UUID) {
+	pathCtx, cancelPath := context.WithCancel(q.ctx)
+	defer cancelPath()
+
+	alpha := q.dht.alpha
+
+	ch := make(chan *queryUpdate, alpha)
+	ch <- &queryUpdate{cause: q.dht.self, heard: q.seedPeers}
+
+	// return only once all outstanding queries have completed.
+	defer q.waitGroup.Wait()
+	for {
+		var cause peer.ID
+		select {
+		case update := <-ch:
+			q.updateState(pathCtx, update)
+			cause = update.cause
+		case <-pathCtx.Done():
+			q.terminate(pathCtx, cancelPath, LookupCancelled)
+		}
+
+		// calculate the maximum number of queries we could be spawning.
+		// Note: NumWaiting will be updated in spawnQuery
+		maxNumQueriesToSpawn := alpha - q.queryPeers.NumWaiting()
+
+		// termination is triggered on end-of-lookup conditions or starvation of unused peers
+		// it also returns the peers we should query next for a maximum of `maxNumQueriesToSpawn` peers.
+		ready, reason, qPeers := q.isReadyToTerminate(pathCtx, maxNumQueriesToSpawn)
+		if ready {
+			q.terminate(pathCtx, cancelPath, reason)
+		}
+
+		if q.terminated {
+			return
+		}
+
+		// try spawning the queries, if there are no available peers to query then we won't spawn them
+		for _, p := range qPeers {
+			q.spawnQueryMod(pathCtx, cause, p, ch, uid)
+		}
+	}
+}
+
 // spawnQuery starts one query, if an available heard peer is found
 func (q *query) spawnQuery(ctx context.Context, cause peer.ID, queryPeer peer.ID, ch chan<- *queryUpdate) {
 	PublishLookupEvent(ctx,
@@ -323,6 +474,29 @@ func (q *query) spawnQuery(ctx context.Context, cause peer.ID, queryPeer peer.ID
 	q.queryPeers.SetState(queryPeer, qpeerset.PeerWaiting)
 	q.waitGroup.Add(1)
 	go q.queryPeer(ctx, ch, queryPeer)
+}
+
+func (q *query) spawnQueryMod(ctx context.Context, cause peer.ID, queryPeer peer.ID, ch chan<- *queryUpdate, uid uuid.UUID) {
+	PublishLookupEvent(ctx,
+		NewLookupEvent(
+			q.dht.self,
+			q.id,
+			q.key,
+			NewLookupUpdateEvent(
+				cause,
+				q.queryPeers.GetReferrer(queryPeer),
+				nil,                  // heard
+				[]peer.ID{queryPeer}, // waiting
+				nil,                  // queried
+				nil,                  // unreachable
+			),
+			nil,
+			nil,
+		),
+	)
+	q.queryPeers.SetState(queryPeer, qpeerset.PeerWaiting)
+	q.waitGroup.Add(1)
+	go q.queryPeerMod(ctx, ch, queryPeer, uid)
 }
 
 func (q *query) isReadyToTerminate(ctx context.Context, nPeersToQuery int) (bool, LookupTerminationReason, []peer.ID) {
@@ -403,7 +577,7 @@ func (q *query) queryPeer(ctx context.Context, ch chan<- *queryUpdate, p peer.ID
 		ch <- &queryUpdate{cause: p, unreachable: []peer.ID{p}}
 		return
 	}
-
+	startQueryWithoutDial := time.Now()
 	// send query RPC to the remote peer
 	newPeers, err := q.queryFn(queryCtx, p)
 	if err != nil {
@@ -415,7 +589,69 @@ func (q *query) queryPeer(ctx context.Context, ch chan<- *queryUpdate, p peer.ID
 	}
 
 	queryDuration := time.Since(startQuery)
+	queryWoutDialDuration := time.Since(startQueryWithoutDial)
+	logger.Info("Finished query to peer " + p.Pretty() + " took " + queryWoutDialDuration.String())
+	//logger.Info("Finished query")
+	// query successful, try to add to RT
+	q.dht.peerFound(q.dht.ctx, p, true)
 
+	// process new peers
+	saw := []peer.ID{}
+	for _, next := range newPeers {
+		if next.ID == q.dht.self { // don't add self.
+			logger.Debugf("PEERS CLOSER -- worker for: %v found self", p)
+			continue
+		}
+
+		// add any other know addresses for the candidate peer.
+		curInfo := q.dht.peerstore.PeerInfo(next.ID)
+		next.Addrs = append(next.Addrs, curInfo.Addrs...)
+
+		// add their addresses to the dialer's peerstore
+		//
+		// add the next peer to the query if matches the query target even if it would otherwise fail the query filter
+		// TODO: this behavior is really specific to how FindPeer works and not GetClosestPeers or any other function
+		isTarget := string(next.ID) == q.key
+		if isTarget || q.dht.queryPeerFilter(q.dht, *next) {
+			q.dht.maybeAddAddrs(next.ID, next.Addrs, pstore.TempAddrTTL)
+			saw = append(saw, next.ID)
+		}
+	}
+
+	ch <- &queryUpdate{cause: p, heard: saw, queried: []peer.ID{p}, queryDuration: queryDuration}
+}
+
+func (q *query) queryPeerMod(ctx context.Context, ch chan<- *queryUpdate, p peer.ID, uid uuid.UUID) {
+	defer q.waitGroup.Done()
+	dialCtx, queryCtx := ctx, ctx
+
+	startQuery := time.Now()
+	// dial the peer
+	if err := q.dht.dialPeerMod(dialCtx, p, uid); err != nil {
+		// remove the peer if there was a dial failure..but not because of a context cancellation
+		if dialCtx.Err() == nil {
+			q.dht.peerStoppedDHT(q.dht.ctx, p)
+		}
+		ch <- &queryUpdate{cause: p, unreachable: []peer.ID{p}}
+		return
+	}
+	queryID := uuid.New()
+	logger.Info("ID: " + uid.String() + " query ID: " + queryID.String() + " Started query to peer " + p.Pretty() + " at time " + time.Now().UTC().String())
+	startQueryWithoutDial := time.Now()
+	// send query RPC to the remote peer
+	newPeers, err := q.queryFn(queryCtx, p)
+	if err != nil {
+		if queryCtx.Err() == nil {
+			q.dht.peerStoppedDHT(q.dht.ctx, p)
+		}
+		ch <- &queryUpdate{cause: p, unreachable: []peer.ID{p}}
+		return
+	}
+
+	queryDuration := time.Since(startQuery)
+	queryWoutDialDuration := time.Since(startQueryWithoutDial)
+	logger.Info("ID: " + uid.String() + " query ID: " + queryID.String() + " Finished query to peer " + p.Pretty() + " took " + queryWoutDialDuration.String() + " at time " + time.Now().UTC().String())
+	//logger.Info("Finished query")
 	// query successful, try to add to RT
 	q.dht.peerFound(q.dht.ctx, p, true)
 
@@ -498,10 +734,12 @@ func (q *query) updateState(ctx context.Context, up *queryUpdate) {
 
 func (dht *IpfsDHT) dialPeer(ctx context.Context, p peer.ID) error {
 	// short-circuit if we're already connected.
+	dialID := uuid.New()
+	connectBool := dht.host.Network().Connectedness(p) == network.Connected
+	logger.Info("Dial ID: " + dialID.String() + " Are we connected to peer " + p.Pretty() + " ? " + strconv.FormatBool(connectBool))
 	if dht.host.Network().Connectedness(p) == network.Connected {
 		return nil
 	}
-
 	logger.Debug("not connected. dialing.")
 	routing.PublishQueryEvent(ctx, &routing.QueryEvent{
 		Type: routing.DialingPeer,
@@ -509,7 +747,10 @@ func (dht *IpfsDHT) dialPeer(ctx context.Context, p peer.ID) error {
 	})
 
 	pi := peer.AddrInfo{ID: p}
-	if err := dht.host.Connect(ctx, pi); err != nil {
+	t1 := time.Now()
+	err := dht.host.Connect(ctx, pi)
+	timeTook := time.Since(t1)
+	if err != nil {
 		logger.Debugf("error connecting: %s", err)
 		routing.PublishQueryEvent(ctx, &routing.QueryEvent{
 			Type:  routing.QueryError,
@@ -519,6 +760,58 @@ func (dht *IpfsDHT) dialPeer(ctx context.Context, p peer.ID) error {
 
 		return err
 	}
+	logger.Info("Dial ID: " + dialID.String() + "Successful connect to " + p.Pretty() + " took " + timeTook.String())
+	connectsToP := dht.host.Network().ConnsToPeer(p)
+	logger.Info("Connections to peer: ")
+	for _, v := range connectsToP {
+		for _, t := range v.GetStreams() {
+			logger.Info("Dial ID: " + dialID.String() + " protocol: " + string(t.Protocol()))
+		}
+
+	}
+	logger.Debugf("connected. dial success.")
+	return nil
+}
+
+func (dht *IpfsDHT) dialPeerMod(ctx context.Context, p peer.ID, uid uuid.UUID) error {
+	// short-circuit if we're already connected.
+
+	connectBool := dht.host.Network().Connectedness(p) == network.Connected
+	dialID := uuid.New()
+	logger.Info("ID: " + uid.String() + " dial ID: " + dialID.String() + " Are we connected to peer " + p.Pretty() + " ? " + strconv.FormatBool(connectBool))
+	if dht.host.Network().Connectedness(p) == network.Connected {
+		return nil
+	}
+	logger.Debug("not connected. dialing.")
+	routing.PublishQueryEvent(ctx, &routing.QueryEvent{
+		Type: routing.DialingPeer,
+		ID:   p,
+	})
+
+	pi := peer.AddrInfo{ID: p}
+	t1 := time.Now()
+	err := dht.host.Connect(ctx, pi)
+	timeTook := time.Since(t1)
+	if err != nil {
+		logger.Debugf("error connecting: %s", err)
+		routing.PublishQueryEvent(ctx, &routing.QueryEvent{
+			Type:  routing.QueryError,
+			Extra: err.Error(),
+			ID:    p,
+		})
+
+		return err
+	}
+	logger.Info("ID: " + uid.String() + " dial ID: " + dialID.String() + "Successful connect to " + p.Pretty() + " took " + timeTook.String())
+	connectsToP := dht.host.Network().ConnsToPeer(p)
+	logger.Info("ID: " + uid.String() + " dial ID: " + dialID.String() + "Connections to peer: ")
+	for _, v := range connectsToP {
+		for _, t := range v.GetStreams() {
+			logger.Info("ID: " + uid.String() + " dial ID: " + dialID.String() + " protocol: " + string(t.Protocol()))
+		}
+
+	}
+	logger.Sync()
 	logger.Debugf("connected. dial success.")
 	return nil
 }

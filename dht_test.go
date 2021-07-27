@@ -19,8 +19,8 @@ import (
 	"github.com/libp2p/go-libp2p-core/peerstore"
 	"github.com/libp2p/go-libp2p-core/routing"
 
-	test "github.com/libp2p/go-libp2p-kad-dht/internal/testing"
-	pb "github.com/libp2p/go-libp2p-kad-dht/pb"
+	test "github.com/peter-tmc/go-libp2p-kad-dht/internal/testing"
+	pb "github.com/peter-tmc/go-libp2p-kad-dht/pb"
 	kb "github.com/libp2p/go-libp2p-kbucket"
 	record "github.com/libp2p/go-libp2p-record"
 	swarmt "github.com/libp2p/go-libp2p-swarm/testing"

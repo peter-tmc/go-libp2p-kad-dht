@@ -6,7 +6,7 @@ import (
 	"time"
 
 	ds "github.com/ipfs/go-datastore"
-	dht "github.com/libp2p/go-libp2p-kad-dht"
+	dht "github.com/peter-tmc/go-libp2p-kad-dht"
 	record "github.com/libp2p/go-libp2p-record"
 )
 

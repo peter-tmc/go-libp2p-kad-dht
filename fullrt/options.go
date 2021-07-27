@@ -2,7 +2,7 @@ package fullrt
 
 import (
 	"fmt"
-	kaddht "github.com/libp2p/go-libp2p-kad-dht"
+	kaddht "github.com/peter-tmc/go-libp2p-kad-dht"
 )
 
 type config struct {

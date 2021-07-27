@@ -14,10 +14,10 @@ import (
 	"github.com/gogo/protobuf/proto"
 	ds "github.com/ipfs/go-datastore"
 	u "github.com/ipfs/go-ipfs-util"
-	"github.com/libp2p/go-libp2p-kad-dht/internal"
-	pb "github.com/libp2p/go-libp2p-kad-dht/pb"
 	recpb "github.com/libp2p/go-libp2p-record/pb"
 	"github.com/multiformats/go-base32"
+	"github.com/peter-tmc/go-libp2p-kad-dht/internal"
+	pb "github.com/peter-tmc/go-libp2p-kad-dht/pb"
 )
 
 // dhthandler specifies the signature of functions that handle DHT messages.
@@ -54,11 +54,13 @@ func (dht *IpfsDHT) handlerForMsgType(t pb.Message_MessageType) dhtHandler {
 
 func (dht *IpfsDHT) handleGetValue(ctx context.Context, p peer.ID, pmes *pb.Message) (_ *pb.Message, err error) {
 	// first, is there even a key?
+
 	k := pmes.GetKey()
 	if len(k) == 0 {
 		return nil, errors.New("handleGetValue but no key was provided")
 	}
 
+	logger.Info("Received GetValue from " + p.Pretty() + " for key " + string(k))
 	// setup response
 	resp := pb.NewMessage(pmes.GetType(), pmes.GetKey(), pmes.GetClusterLevel())
 
@@ -150,10 +152,11 @@ func cleanRecord(rec *recpb.Record) {
 
 // Store a value in this peer local storage
 func (dht *IpfsDHT) handlePutValue(ctx context.Context, p peer.ID, pmes *pb.Message) (_ *pb.Message, err error) {
+
 	if len(pmes.GetKey()) == 0 {
 		return nil, errors.New("handleGetValue but no key was provided")
 	}
-
+	logger.Info("Received GetValue from " + p.Pretty() + " with key " + string(pmes.GetKey()))
 	rec := pmes.GetRecord()
 	if rec == nil {
 		logger.Debugw("got nil record from", "from", p)
