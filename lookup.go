@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/libp2p/go-libp2p-core/peer"
 	"github.com/libp2p/go-libp2p-core/routing"
 
@@ -35,7 +36,7 @@ func (dht *IpfsDHT) GetClosestPeers(ctx context.Context, key string) ([]peer.ID,
 				logger.Debugf("error getting closer peers: %s", err)
 				return nil, err
 			}
-			logger.Info("Contacted peer " + p.Pretty() + "to get key " + key + " peer ID from key is " + peer.ID(key).Pretty() + " received " + strconv.Itoa(len(peers)))
+			logger.Info("Contacted peer " + p.Pretty() + " to get closest peers to key " + key + " peer ID from key is " + peer.ID(key).Pretty() + " received " + strconv.Itoa(len(peers)))
 
 			// For DHT query command
 			routing.PublishQueryEvent(ctx, &routing.QueryEvent{
@@ -61,7 +62,7 @@ func (dht *IpfsDHT) GetClosestPeers(ctx context.Context, key string) ([]peer.ID,
 	return lookupRes.peers, ctx.Err()
 }
 
-func (dht *IpfsDHT) GetClosestPeersWithID(ctx context.Context, key string) ([]peer.ID, error) {
+func (dht *IpfsDHT) GetClosestPeersMod(ctx context.Context, key string, uid uuid.UUID) ([]peer.ID, error) {
 	if key == "" {
 		return nil, fmt.Errorf("can't lookup empty key")
 	}
@@ -74,12 +75,12 @@ func (dht *IpfsDHT) GetClosestPeersWithID(ctx context.Context, key string) ([]pe
 				ID:   p,
 			})
 
-			peers, err := dht.protoMessenger.GetClosestPeers(ctx, p, peer.ID(key))
+			peers, err := dht.protoMessenger.GetClosestPeersMod(ctx, p, peer.ID(key), uid)
 			if err != nil {
 				logger.Debugf("error getting closer peers: %s", err)
 				return nil, err
 			}
-			logger.Info("Contacted peer " + p.Pretty() + "to get key " + key + " peer ID from key is " + peer.ID(key).Pretty() + " received " + strconv.Itoa(len(peers)))
+			logger.Info("ID: " + uid.String() + " Contacted peer " + p.Pretty() + " to get key " + key + " peer ID from key is " + peer.ID(key).Pretty() + " received " + strconv.Itoa(len(peers)))
 
 			// For DHT query command
 			routing.PublishQueryEvent(ctx, &routing.QueryEvent{

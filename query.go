@@ -13,6 +13,7 @@ import (
 	"github.com/libp2p/go-libp2p-core/peer"
 	pstore "github.com/libp2p/go-libp2p-core/peerstore"
 	"github.com/libp2p/go-libp2p-core/routing"
+	"github.com/multiformats/go-multihash"
 
 	"github.com/google/uuid"
 	kb "github.com/libp2p/go-libp2p-kbucket"
@@ -496,7 +497,14 @@ func (q *query) spawnQueryMod(ctx context.Context, cause peer.ID, queryPeer peer
 	)
 	q.queryPeers.SetState(queryPeer, qpeerset.PeerWaiting)
 	q.waitGroup.Add(1)
-	go q.queryPeerMod(ctx, ch, queryPeer, uid)
+	targetKadID := kb.ConvertKey(q.key)
+	mhashbuf, _ := multihash.EncodeName(targetKadID, "sha2-256")
+	mhash, _ := multihash.Cast(mhashbuf)
+	keyEncoded := mhash.B58String()
+	queryID := uuid.New()
+
+	logger.Info("ID: " + uid.String() + " Starting query to peer " + queryPeer.Pretty() + " for the key " + q.key + " encoded " + keyEncoded + " query ID is " + queryID.String())
+	go q.queryPeerMod(ctx, ch, queryPeer, uid, queryID)
 }
 
 func (q *query) isReadyToTerminate(ctx context.Context, nPeersToQuery int) (bool, LookupTerminationReason, []peer.ID) {
@@ -621,13 +629,13 @@ func (q *query) queryPeer(ctx context.Context, ch chan<- *queryUpdate, p peer.ID
 	ch <- &queryUpdate{cause: p, heard: saw, queried: []peer.ID{p}, queryDuration: queryDuration}
 }
 
-func (q *query) queryPeerMod(ctx context.Context, ch chan<- *queryUpdate, p peer.ID, uid uuid.UUID) {
+func (q *query) queryPeerMod(ctx context.Context, ch chan<- *queryUpdate, p peer.ID, uid uuid.UUID, queryID uuid.UUID) {
 	defer q.waitGroup.Done()
 	dialCtx, queryCtx := ctx, ctx
 
 	startQuery := time.Now()
 	// dial the peer
-	if err := q.dht.dialPeerMod(dialCtx, p, uid); err != nil {
+	if err := q.dht.dialPeerMod(dialCtx, p, uid, queryID); err != nil {
 		// remove the peer if there was a dial failure..but not because of a context cancellation
 		if dialCtx.Err() == nil {
 			q.dht.peerStoppedDHT(q.dht.ctx, p)
@@ -635,7 +643,6 @@ func (q *query) queryPeerMod(ctx context.Context, ch chan<- *queryUpdate, p peer
 		ch <- &queryUpdate{cause: p, unreachable: []peer.ID{p}}
 		return
 	}
-	queryID := uuid.New()
 	logger.Info("ID: " + uid.String() + " query ID: " + queryID.String() + " Started query to peer " + p.Pretty() + " at time " + time.Now().UTC().String())
 	startQueryWithoutDial := time.Now()
 	// send query RPC to the remote peer
@@ -760,9 +767,9 @@ func (dht *IpfsDHT) dialPeer(ctx context.Context, p peer.ID) error {
 
 		return err
 	}
-	logger.Info("Dial ID: " + dialID.String() + "Successful connect to " + p.Pretty() + " took " + timeTook.String())
+	logger.Info("Dial ID: " + dialID.String() + " Successful connect to " + p.Pretty() + " took " + timeTook.String())
 	connectsToP := dht.host.Network().ConnsToPeer(p)
-	logger.Info("Connections to peer: ")
+	logger.Info("Dial ID: " + dialID.String() + " Connections to peer: ")
 	for _, v := range connectsToP {
 		for _, t := range v.GetStreams() {
 			logger.Info("Dial ID: " + dialID.String() + " protocol: " + string(t.Protocol()))
@@ -773,12 +780,12 @@ func (dht *IpfsDHT) dialPeer(ctx context.Context, p peer.ID) error {
 	return nil
 }
 
-func (dht *IpfsDHT) dialPeerMod(ctx context.Context, p peer.ID, uid uuid.UUID) error {
+func (dht *IpfsDHT) dialPeerMod(ctx context.Context, p peer.ID, uid uuid.UUID, queryID uuid.UUID) error {
 	// short-circuit if we're already connected.
 
 	connectBool := dht.host.Network().Connectedness(p) == network.Connected
 	dialID := uuid.New()
-	logger.Info("ID: " + uid.String() + " dial ID: " + dialID.String() + " Are we connected to peer " + p.Pretty() + " ? " + strconv.FormatBool(connectBool))
+	logger.Info("ID: " + uid.String() + " query ID: " + queryID.String() + " dial ID: " + dialID.String() + " Are we connected to peer " + p.Pretty() + " ? " + strconv.FormatBool(connectBool))
 	if dht.host.Network().Connectedness(p) == network.Connected {
 		return nil
 	}
@@ -802,14 +809,16 @@ func (dht *IpfsDHT) dialPeerMod(ctx context.Context, p peer.ID, uid uuid.UUID) e
 
 		return err
 	}
-	logger.Info("ID: " + uid.String() + " dial ID: " + dialID.String() + "Successful connect to " + p.Pretty() + " took " + timeTook.String())
+	logger.Info("ID: " + uid.String() + " query ID: " + queryID.String() + " dial ID: " + dialID.String() + " Successful connect to " + p.Pretty() + " took " + timeTook.String())
 	connectsToP := dht.host.Network().ConnsToPeer(p)
-	logger.Info("ID: " + uid.String() + " dial ID: " + dialID.String() + "Connections to peer: ")
-	for _, v := range connectsToP {
-		for _, t := range v.GetStreams() {
-			logger.Info("ID: " + uid.String() + " dial ID: " + dialID.String() + " protocol: " + string(t.Protocol()))
+	if connectsToP != nil {
+		logger.Info("ID: " + uid.String() + " query ID: " + queryID.String() + " dial ID: " + dialID.String() + " Connections to peer: ")
+		for _, v := range connectsToP {
+			/* 	for _, t := range v.GetStreams() {
+				logger.Info("ID: " + uid.String() + " query ID: " + queryID.String() + " dial ID: " + dialID.String() + " protocol: " + string(t.Protocol()))
+			} */
+			logger.Info("ID: " + uid.String() + " query ID: " + queryID.String() + " dial ID: " + dialID.String() + " protocol: " + v.RemoteMultiaddr().String())
 		}
-
 	}
 	logger.Sync()
 	logger.Debugf("connected. dial success.")

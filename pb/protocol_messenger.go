@@ -131,6 +131,21 @@ func (pm *ProtocolMessenger) GetClosestPeers(ctx context.Context, p peer.ID, id 
 	return peers, nil
 }
 
+func (pm *ProtocolMessenger) GetClosestPeersMod(ctx context.Context, p peer.ID, id peer.ID, uid uuid.UUID) ([]*peer.AddrInfo, error) {
+	pmes := NewMessage(Message_FIND_NODE, []byte(id), 0)
+	uidmes := uuid.New()
+	t1 := time.Now()
+	logger.Info("Sent getClosestPeers message to " + p.Pretty() + " at time " + t1.UTC().String() + " for peer " + id.Pretty() + " request ID is " + uid.String() + " message uid is " + uidmes.String())
+	respMsg, err := pm.m.SendRequest(ctx, p, pmes)
+	t2 := time.Now()
+	logger.Info("Received response to getClosestPeers from peer " + p.Pretty() + " took " + t2.Sub(t1).String() + " at time " + t2.UTC().String() + " request ID is " + uid.String() + " message uid is " + uidmes.String())
+	if err != nil {
+		return nil, err
+	}
+	peers := PBPeersToPeerInfos(respMsg.GetCloserPeers())
+	return peers, nil
+}
+
 // PutProvider asks a peer to store that we are a provider for the given key.
 func (pm *ProtocolMessenger) PutProvider(ctx context.Context, p peer.ID, key multihash.Multihash, host host.Host) error {
 	pi := peer.AddrInfo{
@@ -146,7 +161,7 @@ func (pm *ProtocolMessenger) PutProvider(ctx context.Context, p peer.ID, key mul
 
 	pmes := NewMessage(Message_ADD_PROVIDER, key, 0)
 	pmes.ProviderPeers = RawPeerInfosToPBPeers([]peer.AddrInfo{pi})
-
+	logger.Info("Asked peer " + p.Pretty() + " to store that we are provider for the key " + key.B58String())
 	return pm.m.SendMessage(ctx, p, pmes)
 }
 
@@ -176,11 +191,12 @@ func (pm *ProtocolMessenger) GetProviders(ctx context.Context, p peer.ID, key mu
 
 func (pm *ProtocolMessenger) GetProvidersMod(ctx context.Context, p peer.ID, key multihash.Multihash, uid uuid.UUID) ([]*peer.AddrInfo, []*peer.AddrInfo, error) {
 	pmes := NewMessage(Message_GET_PROVIDERS, key, 0)
+	uidmes := uuid.New()
 	t1 := time.Now()
-	logger.Info("Sent getProviders message to " + p.Pretty() + " at time " + t1.UTC().String() + " for key " + key.B58String() + " request ID is " + uid.String())
+	logger.Info("Sent getProviders message to " + p.Pretty() + " at time " + t1.UTC().String() + " for key " + key.B58String() + " request ID is " + uid.String() + " message uid is " + uidmes.String())
 	respMsg, err := pm.m.SendRequest(ctx, p, pmes) //TODO posso meter um log com mandei msg ao peer a certas horas e depois quando se recebe a resposta dar log disso e assim ja da para calcular a latencia
 	t2 := time.Now()
-	logger.Info("Received response to getProviders from peer " + p.Pretty() + " took " + t2.Sub(t1).String() + " at time " + t2.UTC().String() + " request ID is " + uid.String())
+	logger.Info("Received response to getProviders from peer " + p.Pretty() + " took " + t2.Sub(t1).String() + " at time " + t2.UTC().String() + " request ID is " + uid.String() + " message uid is " + uidmes.String())
 	if err != nil {
 		return nil, nil, err
 	}

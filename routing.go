@@ -502,7 +502,7 @@ func (dht *IpfsDHT) ProvideMod(ctx context.Context, key cid.Cid, brdcst bool, ui
 	}
 
 	var exceededDeadline bool
-	peers, err := dht.GetClosestPeers(closerCtx, string(keyMH))
+	peers, err := dht.GetClosestPeersMod(closerCtx, string(keyMH), uid)
 	switch err {
 	case context.DeadlineExceeded:
 		// If the _inner_ deadline has been exceeded but the _outer_
@@ -791,11 +791,11 @@ func (dht *IpfsDHT) findProvidersAsyncRoutineMod(ctx context.Context, key multih
 			return
 		}
 	}
-	ctx = context.WithValue(ctx, "uuid", uid)
+	ctx = context.WithValue(ctx, "uuid", uid) //aqui adiciono o uuid
 	lookupRes, err := dht.runLookupWithFollowupMod(ctx, string(key), uid,
 		func(ctx context.Context, p peer.ID) ([]*peer.AddrInfo, error) { //TODO mudar para ter o uid
 			// For DHT query command
-			uid := ctx.Value("uuid").(uuid.UUID)
+			uid := ctx.Value("uuid").(uuid.UUID) //aqui tiro o uuid
 			logger.Info("Publishing query event for peer " + p.Pretty() + " id of request is " + uid.String())
 			routing.PublishQueryEvent(ctx, &routing.QueryEvent{
 				Type: routing.SendingQuery,

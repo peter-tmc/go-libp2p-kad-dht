@@ -156,7 +156,7 @@ func (dht *IpfsDHT) handlePutValue(ctx context.Context, p peer.ID, pmes *pb.Mess
 	if len(pmes.GetKey()) == 0 {
 		return nil, errors.New("handleGetValue but no key was provided")
 	}
-	logger.Info("Received GetValue from " + p.Pretty() + " with key " + string(pmes.GetKey()))
+	logger.Info("Received PutValue from " + p.Pretty() + " with key " + string(pmes.GetKey()))
 	rec := pmes.GetRecord()
 	if rec == nil {
 		logger.Debugw("got nil record from", "from", p)
